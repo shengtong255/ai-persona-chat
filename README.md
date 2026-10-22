@@ -61,7 +61,7 @@ streamlit run app.py
 | --- | --- |
 | ![chat](docs/screenshot-chat.png) | ![sidebar](docs/screenshot-sidebar.png) |
 
-> 截图放在 `docs/` 目录，README 里用相对路径引用，面试官不跑代码也能看懂。
+> 截图放在 `docs/` 目录，README 里用相对路径引用。
 
 ## License
 
