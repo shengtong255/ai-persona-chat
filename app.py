@@ -1,13 +1,8 @@
-"""AI 角色对话助手 —— 可直接部署到 Streamlit Community Cloud 的版本。
+"""AI 角色对话助手 —— 部署版（含示例引导、示例角色、用量限制、页脚信息）。
 
-相比原稿的改动：
-1. API Key 支持 st.secrets（云端）与 os.environ（本地）两种读取方式；
-2. 会话按浏览器隔离（每个访客一个 uuid 目录），避免公开部署后互相看到对话；
-3. System Prompt 改用 str.format，昵称/性格含 % 也不会崩；
-4. save_session 只在消息追加后调用，不再每敲一个字写盘；
-5. 新建会话在空会话时也能生效；
-6. API 调用加异常处理，失败不白屏；历史消息做上下文截断；
-7. logo 缺失时自动跳过，不会启动失败。
+部署前请确认：
+1. Streamlit Secrets 中已配置 DEEPSEEK_API_KEY；
+2. 仓库根目录有 requirements.txt（streamlit>=1.49、openai>=1.40）。
 """
 
 from __future__ import annotations
@@ -23,7 +18,10 @@ from openai import OpenAI
 
 APP_DIR = Path(__file__).resolve().parent
 SESSION_ROOT = APP_DIR / "session"
-MAX_HISTORY = 20  # 发送给模型的历史消息条数上限
+MAX_HISTORY = 20          # 送给模型的历史消息条数
+MAX_MESSAGES = 40         # 单个会话最多保留的消息条数
+GITHUB_URL = "https://github.com/shengtong255/ai-persona-chat"
+CONTACT_MAIL = "1641417967@qq.com"
 
 SYSTEM_PROMPT = """你叫{nick_name}，现在是用户的真实助理，请完全代入助理角色。
 规则：
@@ -38,9 +36,20 @@ SYSTEM_PROMPT = """你叫{nick_name}，现在是用户的真实助理，请完�
 - {nature}
 你必须严格遵守上述规则来回复用户。"""
 
+# 预设角色：把“人设配置”变成可一键体验的数字人角色卡
+PRESETS = {
+    "包菜｜活泼开朗的南方姑娘": ("包菜", "活泼开朗的南方姑娘，说话带点南方口音，爱用语气词"),
+    "小美｜耐心细致的客服": ("小美", "耐心细致的电商客服，先安抚情绪再给解决方案"),
+    "Alex｜严格的口语外教": ("Alex", "严格的英语口语外教，逐句纠正表达并给出更地道的说法"),
+}
+EXAMPLE_QUESTIONS = [
+    "你今天心情怎么样？",
+    "帮我把这段话改得更正式一点：明天开会别迟到",
+    "用三句话介绍一下你自己",
+]
+
 
 def get_secret(name: str) -> str | None:
-    """优先读 Streamlit secrets，其次读环境变量。"""
     try:
         if name in st.secrets:
             return st.secrets[name]
@@ -49,12 +58,11 @@ def get_secret(name: str) -> str | None:
     return os.environ.get(name)
 
 
-def get_current_time() -> str:
+def now_key() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def user_session_dir() -> Path:
-    """每个浏览器会话一个独立目录，公开部署时互不可见。"""
     if "sid" not in st.session_state:
         st.session_state.sid = uuid.uuid4().hex[:10]
     directory = SESSION_ROOT / st.session_state.sid
@@ -71,9 +79,10 @@ def save_session() -> None:
         "nature": st.session_state.nature,
         "messages": st.session_state.messages,
     }
-    path = user_session_dir() / f"{st.session_state.current_time}.json"
     try:
-        with path.open("w", encoding="utf-8") as f:
+        with (user_session_dir() / f"{st.session_state.current_time}.json").open(
+            "w", encoding="utf-8"
+        ) as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except OSError as exc:
         st.warning(f"会话保存失败：{exc}")
@@ -81,22 +90,20 @@ def save_session() -> None:
 
 def load_sessions() -> list[str]:
     try:
-        return sorted(
-            (p.stem for p in user_session_dir().glob("*.json")), reverse=True
-        )
+        return sorted((p.stem for p in user_session_dir().glob("*.json")), reverse=True)
     except OSError:
         return []
 
 
-def load_session(session_name: str) -> None:
-    path = user_session_dir() / f"{session_name}.json"
+def load_session(name: str) -> None:
+    path = user_session_dir() / f"{name}.json"
     if not path.exists():
         st.error("会话不存在或已被删除")
         return
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        st.session_state.current_time = session_name
+        st.session_state.current_time = name
         st.session_state.nick_name = data.get("nick_name", "包菜")
         st.session_state.nature = data.get("nature", "活泼开朗的南方姑娘")
         st.session_state.messages = data.get("messages", [])
@@ -104,95 +111,118 @@ def load_session(session_name: str) -> None:
         st.error(f"加载会话失败：{exc}")
 
 
-def delete_session(session_name: str) -> None:
-    path = user_session_dir() / f"{session_name}.json"
+def delete_session(name: str) -> None:
     try:
-        path.unlink(missing_ok=True)
+        (user_session_dir() / f"{name}.json").unlink(missing_ok=True)
     except OSError as exc:
         st.error(f"删除会话失败：{exc}")
         return
-    if session_name == st.session_state.current_time:
-        st.session_state.messages = []
-        st.session_state.current_time = get_current_time()
-        st.session_state.nick_name = "包菜"
-        st.session_state.nature = "活泼开朗的南方姑娘"
+    if name == st.session_state.current_time:
+        reset_conversation()
     st.success("删除会话成功")
 
 
 def reset_conversation() -> None:
     st.session_state.messages = []
-    st.session_state.nick_name = "包菜"
-    st.session_state.nature = "活泼开朗的南方姑娘"
-    st.session_state.current_time = get_current_time()
+    st.session_state.current_time = now_key()
+    if "preset" in st.session_state:
+        st.session_state.nick_name, st.session_state.nature = PRESETS[st.session_state.preset]
 
 
-# ---------------- 页面与状态 ----------------
-st.set_page_config(
-    page_title="AI 角色对话助手",
-    page_icon="🥬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+def render_sidebar() -> None:
+    with st.sidebar:
+        logo = APP_DIR / "resource" / "logo.png"
+        if logo.exists():
+            st.image(str(logo), width=120)
 
-st.session_state.setdefault("messages", [])
-st.session_state.setdefault("nick_name", "包菜")
-st.session_state.setdefault("nature", "活泼开朗的南方姑娘")
-st.session_state.setdefault("current_time", get_current_time())
+        st.subheader("1 · 选一个角色")
+        preset = st.selectbox("预设角色", list(PRESETS), key="preset", label_visibility="collapsed")
+        if st.session_state.get("_applied") != preset:
+            st.session_state.nick_name, st.session_state.nature = PRESETS[preset]
+            st.session_state["_applied"] = preset
 
-logo_path = APP_DIR / "resource" / "logo.png"
-if logo_path.exists():
-    st.sidebar.image(str(logo_path))
+        with st.expander("自定义人设", expanded=False):
+            st.session_state.nick_name = st.text_input("昵称", value=st.session_state.nick_name)
+            nature = st.text_area("性格", value=st.session_state.nature, height=90)
+            st.session_state.nature = nature
 
-st.title("AI 角色对话助手")
-st.caption("自定义人设（昵称 + 性格）后开始对话；会话仅保存在当前浏览器，刷新页面即回到初始状态。")
+        st.divider()
+        st.subheader("2 · 开始对话")
+        if st.button("新建会话", width="stretch", icon="✏️"):
+            save_session()
+            reset_conversation()
+            st.rerun()
 
-with st.sidebar:
-    st.subheader("人设配置")
-    nick = st.text_input("昵称", value=st.session_state.nick_name)
-    if nick:
-        st.session_state.nick_name = nick
-    nature = st.text_area("性格", value=st.session_state.nature, height=100)
-    if nature:
-        st.session_state.nature = nature
+        sessions = load_sessions()
+        if sessions:
+            with st.expander(f"历史会话（{len(sessions)}）", expanded=False):
+                for name in sessions[:10]:
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        if st.button(
+                            name,
+                            width="stretch",
+                            key=f"load_{name}",
+                            type="primary" if name == st.session_state.current_time else "secondary",
+                        ):
+                            load_session(name)
+                            st.rerun()
+                    with col2:
+                        if st.button("", width="stretch", icon="🗑️", key=f"del_{name}"):
+                            delete_session(name)
+                            st.rerun()
 
-    st.divider()
-    st.subheader("会话")
-    if st.button("新建会话", width="stretch", icon="✏️"):
-        save_session()
-        reset_conversation()
-        st.rerun()
+        st.divider()
+        st.caption(f"源码：[GitHub]({GITHUB_URL})　·　联系：{CONTACT_MAIL}")
+        st.caption("演示环境：会话仅存于当前浏览器，请勿输入隐私信息。")
 
-    for session_name in load_sessions():
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            if st.button(
-                session_name,
-                width="stretch",
-                icon="🏷️",
-                key=f"load_{session_name}",
-                type="primary" if session_name == st.session_state.current_time else "secondary",
-            ):
-                load_session(session_name)
-                st.rerun()
-        with col2:
-            if st.button("", width="stretch", icon="❌", key=f"delete_{session_name}"):
-                delete_session(session_name)
-                st.rerun()
 
-st.text(f"当前会话：{st.session_state.current_time}")
+def main() -> None:
+    st.set_page_config(
+        page_title="AI 角色对话助手 · 康俊杰",
+        page_icon="🥬",
+        layout="centered",
+        initial_sidebar_state="auto",
+    )
+    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("nick_name", "包菜")
+    st.session_state.setdefault("nature", "活泼开朗的南方姑娘")
+    st.session_state.setdefault("current_time", now_key())
+    st.session_state.setdefault("preset", list(PRESETS)[0])
 
-for message in st.session_state.messages:
-    st.chat_message(message["role"]).write(message["content"])
+    render_sidebar()
 
-prompt = st.chat_input("请输入你想问的问题")
-if prompt:
-    st.chat_message("user").write(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.title("AI 角色对话助手")
+    st.caption("选一个角色 → 直接问它问题。人设（昵称 / 性格）会实时注入 System Prompt，"
+               "回复风格随之改变；支持流式输出与多会话。｜首次打开可能需要 20～30 秒唤醒。")
+
+    if not st.session_state.messages:
+        st.markdown("**试试这几个问题：**")
+        cols = st.columns(3)
+        for col, question in zip(cols, EXAMPLE_QUESTIONS):
+            if col.button(question, width="stretch"):
+                st.session_state.pending = question
+
+    for message in st.session_state.messages:
+        st.chat_message(message["role"]).write(message["content"])
+
+    prompt = st.chat_input("输入你想问的问题（示例：帮我写一句离职原因）", max_chars=300)
+    if "pending" in st.session_state:
+        prompt = st.session_state.pop("pending")
+    if not prompt:
+        return
+
+    if len(st.session_state.messages) >= MAX_MESSAGES:
+        st.warning("本会话已达演示上限，请点「新建会话」继续体验。")
+        return
 
     api_key = get_secret("DEEPSEEK_API_KEY")
     if not api_key:
-        st.error("未配置 DEEPSEEK_API_KEY，请在 .streamlit/secrets.toml 或环境变量中设置。")
-        st.stop()
+        st.error("未配置 DEEPSEEK_API_KEY，请在 Settings → Secrets 中配置后重试。")
+        return
+
+    st.chat_message("user").write(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
     system = SYSTEM_PROMPT.format(
@@ -200,23 +230,27 @@ if prompt:
     )
     history = st.session_state.messages[-MAX_HISTORY:]
 
-    placeholder = st.empty()
-    full_response = ""
     try:
         stream = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": system}, *history],
             stream=True,
         )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                full_response += delta
-                placeholder.chat_message("assistant").write(full_response)
-    except Exception as exc:  # 网络、额度、限流都走这里
-        st.error(f"模型调用失败，请稍后重试：{exc}")
-        st.stop()
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+        def chunks():
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+
+        full = st.write_stream(chunks())
+    except Exception as exc:
+        st.error(f"模型调用失败，请稍后重试：{exc}")
+        return
+
+    st.session_state.messages.append({"role": "assistant", "content": full})
     save_session()
     st.rerun()
+
+
+main()
