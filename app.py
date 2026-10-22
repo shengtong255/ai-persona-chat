@@ -179,7 +179,7 @@ def render_sidebar() -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="AI 角色对话助手 · 康俊杰",
+        page_title="AI 角色对话助手",
         page_icon="🥬",
         layout="centered",
         initial_sidebar_state="auto",
