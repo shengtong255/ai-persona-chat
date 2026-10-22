@@ -57,9 +57,17 @@ streamlit run app.py
 
 ## 截图
 
-| 主界面 | 侧边栏人设配置 |
-| --- | --- |
-| ![chat](docs/screenshot-chat.png) | ![sidebar](docs/screenshot-sidebar.png) |
+**首屏：选一个角色 → 直接点示例问题**
+
+![首屏](docs/screenshot-empty.png)
+
+**对话：人设生效后，回复语气随角色变化（角色：包菜｜活泼开朗的南方姑娘）**
+
+![对话](docs/screenshot-chat.png)
+
+**角色切换：三套预设人设，一键换风格**
+
+![角色切换](docs/screenshot-sidebar.png)
 
 > 截图放在 `docs/` 目录，README 里用相对路径引用。
 
