@@ -206,7 +206,7 @@ def main() -> None:
     for message in st.session_state.messages:
         st.chat_message(message["role"]).write(message["content"])
 
-    prompt = st.chat_input("输入你想问的问题（示例：帮我写一句离职原因）", max_chars=300)
+    prompt = st.chat_input("输入你想问的问题（示例：帮我做一份XX(城市)的美食攻略）", max_chars=300)
     if "pending" in st.session_state:
         prompt = st.session_state.pop("pending")
     if not prompt:
